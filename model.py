@@ -151,6 +151,9 @@ class Attention(nn.Module):
         self.n_local_heads = config.n_local_heads
         self.dim = config.dim
         self._register_load_state_dict_pre_hook(self.load_hook)
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
 
     def load_hook(self, state_dict, prefix, *args):
         if prefix + "wq.weight" in state_dict:
@@ -179,7 +182,13 @@ class Attention(nn.Module):
 
         k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
         v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+        if self.flash:
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(mask == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            y = att @ v
 
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
 
